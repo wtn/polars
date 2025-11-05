@@ -1405,3 +1405,41 @@ fn test_read_io_reader() {
         .head(Some(df.height()));
     assert_eq!(&df, &expected);
 }
+
+#[test]
+fn test_leading_empty_lines_single_column() -> PolarsResult<()> {
+    let csv = "\ncol1\nval1\nval2\n";
+    let file = Cursor::new(csv);
+    let df = CsvReadOptions::default()
+        .with_has_header(true)
+        .into_reader_with_file_handle(file)
+        .finish()?;
+
+    assert_eq!(df.shape(), (2, 1));
+    assert_eq!(df.column("col1")?.str()?.get(0), Some("val1"));
+    assert_eq!(df.column("col1")?.str()?.get(1), Some("val2"));
+
+    let csv = "\n\ncol1\nval1\nval2\n";
+    let file = Cursor::new(csv);
+    let df = CsvReadOptions::default()
+        .with_has_header(true)
+        .into_reader_with_file_handle(file)
+        .finish()?;
+
+    assert_eq!(df.shape(), (2, 1));
+    assert_eq!(df.column("col1")?.str()?.get(0), Some("val1"));
+    assert_eq!(df.column("col1")?.str()?.get(1), Some("val2"));
+
+    let csv = "\ncol1,col2\nval1,val2\nval3,val4\n";
+    let file = Cursor::new(csv);
+    let df = CsvReadOptions::default()
+        .with_has_header(true)
+        .into_reader_with_file_handle(file)
+        .finish()?;
+
+    assert_eq!(df.shape(), (2, 2));
+    assert_eq!(df.column("col1")?.str()?.get(0), Some("val1"));
+    assert_eq!(df.column("col2")?.str()?.get(0), Some("val2"));
+
+    Ok(())
+}

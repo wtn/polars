@@ -2936,3 +2936,22 @@ def test_write_csv_categorical_23939(dt: pl.DataType) -> None:
     )
     expected = "b\n" + "a\n" * n_rows
     assert df.write_csv() == expected
+
+
+def test_leading_empty_lines_single_column() -> None:
+    """Test that leading empty lines are skipped in single-column CSVs."""
+    csv = "\ncol1\nval1\nval2\n"
+    df = pl.read_csv(csv.encode(), has_header=True)
+    assert df.shape == (2, 1)
+    assert df["col1"].to_list() == ["val1", "val2"]
+
+    csv = "\n\ncol1\nval1\nval2\n"
+    df = pl.read_csv(csv.encode(), has_header=True)
+    assert df.shape == (2, 1)
+    assert df["col1"].to_list() == ["val1", "val2"]
+
+    csv = "\ncol1,col2\nval1,val2\nval3,val4\n"
+    df = pl.read_csv(csv.encode(), has_header=True)
+    assert df.shape == (2, 2)
+    assert df["col1"].to_list() == ["val1", "val3"]
+    assert df["col2"].to_list() == ["val2", "val4"]
