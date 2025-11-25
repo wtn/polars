@@ -3971,3 +3971,51 @@ def test_join_lazyframe_with_itself_after_sort_25395() -> None:
     result = lf.sort("a").join(lf, on="a").collect()
 
     assert_frame_equal(result, pl.DataFrame({"a": [1]}))
+
+
+def test_self_join_sort_removal_optimization_preserved() -> None:
+    # When self-joining with a sort that is not needed by the output,
+    # the sort should be removed from the plan (optimization preserved).
+    lf = pl.LazyFrame({"a": [3, 1, 2], "b": [4, 5, 6]})
+    q = lf.sort("a").join(lf, on="a")
+
+    # The sort should be removed since join doesn't require ordering
+    plan = q.explain()
+    assert "SORT" not in plan
+
+    # Result should still be correct
+    result = q.collect()
+    expected = pl.DataFrame({"a": [3, 1, 2], "b": [4, 5, 6], "b_right": [4, 5, 6]})
+    assert_frame_equal(result.sort("a"), expected.sort("a"))
+
+
+def test_self_join_sort_kept_when_needed() -> None:
+    # When the output requires ordering, sort should be kept.
+    lf = pl.LazyFrame({"a": [3, 1, 2], "b": [4, 5, 6]})
+    q = lf.sort("a").join(lf, on="a", maintain_order="left")
+
+    # The sort should be kept since maintain_order requires it
+    plan = q.explain()
+    assert "SORT" in plan
+
+    # Result should be correctly ordered
+    result = q.collect()
+    expected = pl.DataFrame({"a": [1, 2, 3], "b": [5, 6, 4], "b_right": [5, 6, 4]})
+    assert_frame_equal(result, expected)
+
+
+def test_self_join_multiple_cse_with_sorts() -> None:
+    # Multiple self-joins with sorts - verify CSE and optimization work together
+    lf = pl.LazyFrame({"a": [2, 1, 3]})
+    sorted_lf = lf.sort("a")
+
+    # Join sorted lf with itself twice - CSE should deduplicate
+    q = sorted_lf.join(sorted_lf, on="a").join(lf, on="a")
+
+    # The sort should be removed since joins don't require ordering
+    plan = q.explain()
+    assert "SORT" not in plan
+
+    result = q.collect()
+    expected = pl.DataFrame({"a": [2, 1, 3]})
+    assert_frame_equal(result.sort("a"), expected.sort("a"))

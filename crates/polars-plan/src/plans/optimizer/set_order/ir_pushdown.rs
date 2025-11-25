@@ -14,6 +14,17 @@ use crate::dsl::{PartitionStrategyIR, SinkTypeIR, UnionOptions};
 use crate::plans::set_order::expr_pushdown::ColumnOrderObserved;
 use crate::plans::{AExpr, IR, is_scalar_ae};
 
+fn get_canonical_node(
+    node: Node,
+    ir_arena: &Arena<IR>,
+    cache_proxy: &PlHashMap<UniqueId, Vec<Node>>,
+) -> Node {
+    match ir_arena.get(node) {
+        IR::Cache { id, .. } => cache_proxy.get(id).map(|nodes| nodes[0]).unwrap_or(node),
+        _ => node,
+    }
+}
+
 pub(super) fn pushdown_orders(
     roots: &[Node],
     ir_arena: &mut Arena<IR>,
@@ -59,14 +70,14 @@ pub(super) fn pushdown_orders(
                 slice,
                 sort_options: _,
                 ..
-            } if slice.is_none() && all_outputs_unordered
-            // Skip optimization if input node is missing from outputs (e.g. after CSE).
-            && outputs.contains_key(input) =>
-            {
+            } if slice.is_none() && all_outputs_unordered => {
                 // _ -> Unordered
                 //
                 // Remove sort.
                 let input = *input;
+                // Canonicalize input if it's a cache node (CSE may create multiple cache
+                // nodes with the same id, but outputs map uses the canonical first one).
+                let canonical_input = get_canonical_node(input, ir_arena, cache_proxy);
 
                 _ = ir_arena.take(node);
 
@@ -78,11 +89,14 @@ pub(super) fn pushdown_orders(
                         .nth(to_input_idx)
                         .unwrap() = input;
                     outputs
-                        .get_mut(&input)
+                        .get_mut(&canonical_input)
                         .unwrap()
                         .push((to_node, to_input_idx));
                 }
-                outputs.get_mut(&input).unwrap().retain(|(n, _)| *n != node);
+                outputs
+                    .get_mut(&canonical_input)
+                    .unwrap()
+                    .retain(|(n, _)| *n != node);
 
                 if !orders.contains_key(&input) {
                     stack.push(input);
