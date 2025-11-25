@@ -51,6 +51,8 @@ impl<W: Write> FileWriter<W> {
                 parquet_schema,
                 FileWriteOptions {
                     version: options.version,
+                    // Column indexes require page-level statistics, which are not yet
+                    // supported for dictionary-encoded columns with multiple data pages.
                     write_indexes: false,
                     write_statistics: options.has_statistics(),
                 },

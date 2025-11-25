@@ -352,6 +352,11 @@ fn normalized_validity<K: DictionaryKey>(array: &DictionaryArray<K>) -> Option<B
     }
 }
 
+/// Serialize dictionary keys for flat (non-nested) arrays into multiple pages.
+///
+/// Page-level statistics are not currently supported because computing min/max
+/// of dictionary values per page would require additional lookups. Column-level
+/// statistics are still written via the dictionary page.
 fn serialize_keys_flat<K: DictionaryKey>(
     array: &DictionaryArray<K>,
     type_: PrimitiveType,
@@ -364,6 +369,11 @@ fn serialize_keys_flat<K: DictionaryKey>(
     let validity = normalized_validity(array);
     let mut array = array.clone();
     array.set_validity(validity);
+
+    // Early return for empty arrays to avoid division by zero in page estimation
+    if array.is_empty() {
+        return Ok(vec![]);
+    }
 
     let estimated_bits_per_value = array.values().len().next_power_of_two().trailing_zeros() + 1;
     let estimated_bits_per_value = estimated_bits_per_value as usize;
@@ -670,5 +680,149 @@ pub fn array_to_pages<K: DictionaryKey>(
             ))
         },
         _ => polars_bail!(nyi = "Dictionary arrays only support dictionary encoding"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::datatypes::IntegerType;
+
+    fn make_dict_array(num_values: usize, num_dict_values: usize) -> DictionaryArray<u32> {
+        let keys = PrimitiveArray::<u32>::from_vec(
+            (0..num_values)
+                .map(|i| (i % num_dict_values) as u32)
+                .collect(),
+        );
+        let values: Vec<Option<&str>> = (0..num_dict_values)
+            .map(|i| Some(["A", "B", "C", "D", "E", "F", "G", "H"][i % 8]))
+            .collect();
+        let values = Utf8ViewArray::from_slice(&values);
+        DictionaryArray::<u32>::try_new(
+            ArrowDataType::Dictionary(
+                IntegerType::UInt32,
+                Box::new(ArrowDataType::Utf8View),
+                false,
+            ),
+            keys,
+            values.boxed(),
+        )
+        .unwrap()
+    }
+
+    fn make_options(data_page_size: Option<usize>) -> WriteOptions {
+        WriteOptions {
+            statistics: super::super::StatisticsOptions::empty(),
+            compression: crate::parquet::compression::CompressionOptions::Uncompressed,
+            version: super::super::Version::V1,
+            data_page_size,
+        }
+    }
+
+    fn make_type() -> PrimitiveType {
+        PrimitiveType::from_physical(
+            "col".into(),
+            crate::parquet::schema::types::PhysicalType::Int32,
+        )
+    }
+
+    /// Regression test for https://github.com/pola-rs/polars/issues/20141
+    /// Verifies that dictionary-encoded columns produce multiple data pages
+    /// when data_page_size is small.
+    #[test]
+    fn test_dictionary_multiple_data_pages() {
+        let dict_array = make_dict_array(10000, 1);
+        let options = make_options(Some(1));
+        let type_ = make_type();
+
+        let data_pages = serialize_keys_flat(&dict_array, type_, None, options).unwrap();
+
+        assert!(
+            data_pages.len() > 1,
+            "Expected multiple data pages with small data_page_size, got {}",
+            data_pages.len()
+        );
+    }
+
+    #[test]
+    fn test_dictionary_single_page_when_small() {
+        // Small array should fit in one page with default page size
+        let dict_array = make_dict_array(100, 1);
+        let options = make_options(None); // Default page size (1MB)
+        let type_ = make_type();
+
+        let data_pages = serialize_keys_flat(&dict_array, type_, None, options).unwrap();
+
+        assert_eq!(
+            data_pages.len(),
+            1,
+            "Small array should fit in single page"
+        );
+    }
+
+    #[test]
+    fn test_dictionary_larger_dictionary() {
+        // Test with multiple dictionary values (affects bit width estimation)
+        let dict_array = make_dict_array(10000, 8);
+        let options = make_options(Some(1));
+        let type_ = make_type();
+
+        let data_pages = serialize_keys_flat(&dict_array, type_, None, options).unwrap();
+
+        assert!(
+            data_pages.len() > 1,
+            "Expected multiple data pages, got {}",
+            data_pages.len()
+        );
+    }
+
+    #[test]
+    fn test_dictionary_with_nulls() {
+        // Create array with nulls
+        let keys = PrimitiveArray::<u32>::from(vec![Some(0), None, Some(0), None, Some(0)]);
+        let values = Utf8ViewArray::from_slice([Some("A")]);
+        let dict_array = DictionaryArray::<u32>::try_new(
+            ArrowDataType::Dictionary(
+                IntegerType::UInt32,
+                Box::new(ArrowDataType::Utf8View),
+                false,
+            ),
+            keys,
+            values.boxed(),
+        )
+        .unwrap();
+
+        let options = make_options(Some(1));
+        let type_ = make_type();
+
+        let data_pages = serialize_keys_flat(&dict_array, type_, None, options).unwrap();
+
+        // Should complete without error
+        assert!(!data_pages.is_empty());
+    }
+
+    #[test]
+    fn test_dictionary_empty_array() {
+        // Empty arrays should not panic (regression test for division by zero)
+        let keys = PrimitiveArray::<u32>::from(Vec::<Option<u32>>::new());
+        let values = Utf8ViewArray::from_slice(Vec::<Option<&str>>::new());
+        let dict_array = DictionaryArray::<u32>::try_new(
+            ArrowDataType::Dictionary(
+                IntegerType::UInt32,
+                Box::new(ArrowDataType::Utf8View),
+                false,
+            ),
+            keys,
+            values.boxed(),
+        )
+        .unwrap();
+
+        let options = make_options(Some(1));
+        let type_ = make_type();
+
+        let data_pages = serialize_keys_flat(&dict_array, type_, None, options).unwrap();
+
+        // Empty array should produce no data pages
+        assert!(data_pages.is_empty());
     }
 }
