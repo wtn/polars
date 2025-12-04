@@ -131,3 +131,36 @@ def test_unnest_raises_on_non_struct_23654() -> None:
     for z in "abcdef":
         with pytest.raises(InvalidOperationError):
             df.unnest(z)
+
+
+def test_struct_field_after_shuffle_18234() -> None:
+    # https://github.com/pola-rs/polars/issues/18234
+    # struct.field("*") after shuffle() should produce consistent results
+    # (each row's fields should stay together after shuffling)
+    df = pl.DataFrame({"a": list(range(100)), "b": list(range(100))})
+
+    # Extract fields after shuffling a struct - rows should stay intact
+    result = df.select(pl.struct(pl.all()).shuffle().struct.field("*"))
+
+    # Each row's a and b values should be equal (they were equal before shuffle)
+    assert (result["a"] == result["b"]).all()
+
+    # Also verify that unnest produces the same result as struct.field("*")
+    result_unnest = df.select(pl.struct(pl.all()).shuffle()).unnest("a")
+    # Note: we can't directly compare result and result_unnest because they use
+    # different random seeds, but both should have matching a and b values
+    assert (result_unnest["a"] == result_unnest["b"]).all()
+
+
+def test_struct_field_after_sample_18234() -> None:
+    # Related to #18234 - sample should also produce consistent results
+    df = pl.DataFrame({"a": list(range(100)), "b": list(range(100))})
+
+    # sample_n
+    result = df.select(pl.struct(pl.all()).sample(n=50).struct.field("*"))
+    assert len(result) == 50
+    assert (result["a"] == result["b"]).all()
+
+    # sample with fraction
+    result = df.select(pl.struct(pl.all()).sample(fraction=0.5).struct.field("*"))
+    assert (result["a"] == result["b"]).all()
