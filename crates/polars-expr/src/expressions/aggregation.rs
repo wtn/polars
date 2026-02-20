@@ -593,51 +593,56 @@ impl PhysicalExpr for AggQuantileExpr {
         // don't change names by aggregations as is done in polars-core
         let keep_name = ac.get_values().name().clone();
 
-        // Check if quantile is a literal/scalar (same for all groups) or varies per group
-        let is_uniform_quantile = quantile_ac.is_literal()
-            || matches!(quantile_ac.agg_state(), AggState::LiteralScalar(_));
+        match quantile_ac.agg_state() {
+            AggState::LiteralScalar(_) => {
+                // Fast path: single quantile value for all groups
+                let quantile = self.get_quantile_from_scalar(&quantile_ac)?;
 
-        if is_uniform_quantile {
-            // Fast path: single quantile value for all groups
-            let quantile = self.get_quantile_from_scalar(&quantile_ac)?;
+                if let AggState::LiteralScalar(c) = &mut ac.state {
+                    *c = c
+                        .quantile_reduce(quantile, self.method)?
+                        .into_column(keep_name);
+                    return Ok(ac);
+                }
 
-            if let AggState::LiteralScalar(c) = &mut ac.state {
-                *c = c
-                    .quantile_reduce(quantile, self.method)?
-                    .into_column(keep_name);
-                return Ok(ac);
-            }
+                // SAFETY:
+                // groups are in bounds
+                let mut agg = unsafe {
+                    ac.flat_naive()
+                        .into_owned()
+                        .agg_quantile(ac.groups(), quantile, self.method)
+                };
+                agg.rename(keep_name);
+                Ok(AggregationContext::from_agg_state(
+                    AggregatedScalar(agg),
+                    Cow::Borrowed(groups),
+                ))
+            },
+            AggState::AggregatedScalar(_) => {
+                // Different quantile value per group
+                let quantiles = self.get_quantiles_per_group(&quantile_ac)?;
 
-            // SAFETY:
-            // groups are in bounds
-            let mut agg = unsafe {
-                ac.flat_naive()
-                    .into_owned()
-                    .agg_quantile(ac.groups(), quantile, self.method)
-            };
-            agg.rename(keep_name);
-            Ok(AggregationContext::from_agg_state(
-                AggregatedScalar(agg),
-                Cow::Borrowed(groups),
-            ))
-        } else {
-            // Different quantile value per group
-            let quantiles = self.get_quantiles_per_group(&quantile_ac)?;
-
-            // SAFETY:
-            // groups are in bounds
-            let mut agg = unsafe {
-                ac.flat_naive().into_owned().agg_varying_quantile(
-                    ac.groups(),
-                    &quantiles,
-                    self.method,
-                )
-            };
-            agg.rename(keep_name);
-            Ok(AggregationContext::from_agg_state(
-                AggregatedScalar(agg),
-                Cow::Borrowed(groups),
-            ))
+                // SAFETY:
+                // groups are in bounds
+                let mut agg = unsafe {
+                    ac.flat_naive().into_owned().agg_varying_quantile(
+                        ac.groups(),
+                        &quantiles,
+                        self.method,
+                    )
+                };
+                agg.rename(keep_name);
+                Ok(AggregationContext::from_agg_state(
+                    AggregatedScalar(agg),
+                    Cow::Borrowed(groups),
+                ))
+            },
+            _ => {
+                polars_bail!(ComputeError:
+                    "quantile expression in group_by must produce a scalar per group; \
+                    use .first() or another aggregation to reduce to a scalar"
+                );
+            },
         }
     }
 

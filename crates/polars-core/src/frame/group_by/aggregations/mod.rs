@@ -378,6 +378,13 @@ where
     K: PolarsNumericType,
     <K as datatypes::PolarsNumericType>::Native: num_traits::Float + quantile_filter::SealedRolling,
 {
+    debug_assert_eq!(
+        quantiles.len(),
+        groups.len(),
+        "quantiles length ({}) must match groups length ({})",
+        quantiles.len(),
+        groups.len()
+    );
     match groups {
         GroupsType::Idx(groups) => {
             let ca = ca.rechunk();
